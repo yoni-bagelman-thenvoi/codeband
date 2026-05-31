@@ -851,3 +851,69 @@ class TestReviewRoundCap:
             transition("st-x", "room-1", "in_progress", caller_role="coder",
                        store=store)
         assert _log_count(store, "st-x") == before
+
+    # ── upgrade path: a pre-#9 store whose rows predate the column ───────────
+
+    def test_pre_column_store_upgrades_with_zero_backfill(self, tmp_path):
+        """A subtask row created before ``review_round`` existed must read as 0
+        (not NULL) after the migration, so the cap behaves normally on it.
+
+        Guards the nasty silent failure mode: a NULL-backfilled column would
+        make ``NULL >= MAX`` false and the old subtask could never cap. The
+        ``ALTER TABLE … NOT NULL DEFAULT 0`` migration backfills 0 instead; this
+        pins that so it can't regress unnoticed."""
+        db_path = tmp_path / "state" / "orchestration.db"
+        db_path.parent.mkdir(parents=True)
+
+        # Hand-build a PRE-#9 schema (subtask_states without review_round) and
+        # seed a subtask already parked at review_failed — i.e. mid-loop when an
+        # upgrade lands.
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                task_id TEXT PRIMARY KEY, description TEXT NOT NULL,
+                room_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE TABLE subtask_states (
+                subtask_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                state TEXT NOT NULL DEFAULT 'planned', assigned_worker TEXT,
+                pr_number INTEGER, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, metadata TEXT
+            );
+            CREATE TABLE transition_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, subtask_id TEXT NOT NULL,
+                from_state TEXT NOT NULL, to_state TEXT NOT NULL,
+                caller_role TEXT NOT NULL, timestamp TEXT NOT NULL, reason TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO tasks VALUES ('room-1','demo','room-1','t','active')"
+        )
+        conn.execute(
+            "INSERT INTO subtask_states "
+            "(subtask_id, task_id, state, created_at, updated_at) "
+            "VALUES ('old-st','room-1','review_failed','t','t')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Reopening through StateStore runs the ALTER TABLE migration.
+        store = StateStore(db_path)
+
+        # Backfill is integer 0, not NULL — at both the raw and typed layer.
+        raw = sqlite3.connect(db_path).execute(
+            "SELECT review_round, typeof(review_round) FROM subtask_states "
+            "WHERE subtask_id = 'old-st'"
+        ).fetchone()
+        assert raw == (0, "integer")
+        assert store.get_subtask("old-st").review_round == 0
+
+        # The old subtask is NOT spuriously capped: with 0 < MAX it reworks
+        # (proving the value is a real 0, not a NULL that would crash on >=).
+        transition("old-st", "room-1", "in_progress", caller_role="coder",
+                   store=store)
+        assert store.get_subtask("old-st").state == "in_progress"
