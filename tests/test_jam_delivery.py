@@ -615,11 +615,18 @@ async def test_durable_dedupe_production_lazy_build(tmp_path):
     adapter = FakeAdapter()
     control = FakeControl()
     # No store= injected — triggers the lazy-build path in start().
-    agent = JamAgent(adapter, _creds("agent-lazy"), config, control=control,
-                     link=SimpleNamespace(rest=SimpleNamespace()),
-                     preprocessor=DefaultPreprocessor())
+    agent = JamAgent(
+        adapter,
+        _creds("agent-lazy"),
+        config,
+        control=control,
+        link=SimpleNamespace(rest=SimpleNamespace()),
+        preprocessor=DefaultPreprocessor(),
+    )
     agent._session_config = SessionConfig(
-        enable_context_hydration=False, max_message_retries=3, idle_resync_seconds=1,
+        enable_context_hydration=False,
+        max_message_retries=3,
+        idle_resync_seconds=1,
     )
     # start() builds the store lazily.
     await agent.start()

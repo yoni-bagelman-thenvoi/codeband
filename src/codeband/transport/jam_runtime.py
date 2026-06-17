@@ -503,9 +503,7 @@ class _RoomWorker:
             try:
                 agent._store.mark_jam_message_handled(agent._target.scope, msg_id)
             except Exception:
-                logger.warning(
-                    "jam: durable-handled write failed for %s (in-memory only)", msg_id
-                )
+                logger.warning("jam: durable-handled write failed for %s (in-memory only)", msg_id)
 
         # Success → clear retry tracking, mark handled, ack (non-fatal).
         self._retry.mark_success(msg_id)
