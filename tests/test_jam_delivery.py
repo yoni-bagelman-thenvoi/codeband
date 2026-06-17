@@ -416,3 +416,60 @@ def test_agent_scope_and_target():
     assert agent_scope("abc") == "codeband-abc"
     t = Target(scope="codeband-abc")
     assert t.as_dict() == {"profile": "default", "scope": "codeband-abc", "handle": ""}
+
+
+# --- doctor tripwire for the SDK-internals coupling ------------------------
+
+
+def _doctor_ctx(tmp_path):
+    from codeband.doctor import Context
+
+    return Context(project_dir=tmp_path)
+
+
+def test_doctor_jam_coupling_ok_on_current_sdk(tmp_path, monkeypatch):
+    from codeband.doctor import Status, check_jam_delivery_sdk_coupling
+
+    monkeypatch.delenv("CODEBAND_DELIVERY", raising=False)
+    res = check_jam_delivery_sdk_coupling(_doctor_ctx(tmp_path))
+    assert res.status is Status.OK
+
+
+def test_doctor_jam_coupling_warn_when_symbol_moved_sdk_mode(tmp_path, monkeypatch):
+    """A moved SDK symbol → WARN on the default sdk path (exit code unaffected)."""
+    import importlib
+
+    from codeband.doctor import Status, check_jam_delivery_sdk_coupling
+
+    monkeypatch.delenv("CODEBAND_DELIVERY", raising=False)
+    real = importlib.import_module
+
+    def _fake(name, *a, **k):
+        if name == "thenvoi.runtime.retry_tracker":
+            raise ImportError("simulated rename")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", _fake)
+    res = check_jam_delivery_sdk_coupling(_doctor_ctx(tmp_path))
+    assert res.status is Status.WARN
+    assert "retry_tracker" in res.message
+
+
+def test_doctor_jam_coupling_fails_when_jam_selected(tmp_path, monkeypatch):
+    """Same moved symbol, but CODEBAND_DELIVERY=jam → FAIL (path in use is broken)."""
+    import importlib
+
+    from codeband.doctor import Status, check_jam_delivery_sdk_coupling
+
+    monkeypatch.setenv("CODEBAND_DELIVERY", "jam")
+    real = importlib.import_module
+
+    def _fake(name, *a, **k):
+        if name == "thenvoi.runtime.retry_tracker":
+            raise ImportError("simulated rename")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", _fake)
+    res = check_jam_delivery_sdk_coupling(_doctor_ctx(tmp_path))
+    assert res.status is Status.FAIL
+    assert res.remediation and "jam_runtime.py" in res.remediation

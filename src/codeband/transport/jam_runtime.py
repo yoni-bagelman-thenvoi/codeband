@@ -27,6 +27,38 @@ WebSocket + ``/next`` ingestion with the jam Pull path:
 **Outbound is unchanged**: the adapter's ``tools.send_message`` still posts over
 the SDK REST client (``ThenvoiLink.rest``) — already transport-agnostic and
 non-wedging — so ``AgentTools`` is byte-identical to the SDK path.
+
+────────────────────────────────────────────────────────────────────────────
+SDK-INTERNALS COUPLING — RE-VERIFY ON ANY band-sdk BUMP
+────────────────────────────────────────────────────────────────────────────
+This runtime deliberately bypasses the SDK's public ``Agent.create(...).run()``
+facade (that facade IS the wedging ``/next`` path) and reassembles the pieces
+underneath it. It therefore depends on band-sdk surfaces that carry NO stability
+promise — a minor SDK upgrade can move/rename them and silently break this path
+(the default ``sdk`` path depends on none of them). The surfaces, most-fragile
+first:
+
+* ``thenvoi.runtime.execution.ExecutionContext._ensure_fresh_context()`` — a
+  PRIVATE method we call directly to hydrate participants/history. Highest risk.
+* ``thenvoi.runtime.execution.ExecutionContext`` — constructed here with a no-op
+  ``on_execute`` and its WS/``/next`` loop never started (used only as the
+  ``AgentTools.from_context`` source + preprocessor input).
+* adapter ``_thenvoi_agent_id`` — a private attribute the SDK's ``Agent.start``
+  sets; we set it ourselves before ``adapter.on_started`` / ``adapter.on_event``.
+* ``thenvoi.preprocessing.default.DefaultPreprocessor`` (+ its ``process`` shape).
+* ``thenvoi.runtime.retry_tracker.MessageRetryTracker`` (record_attempt/
+  is_permanently_failed/mark_success).
+* ``thenvoi.client.streaming.MessageCreatedPayload`` / ``MessageMetadata`` — the
+  inbound payload models (the preprocessor reads ``payload.inserted_at``).
+* ``thenvoi.platform.{link.ThenvoiLink, event.MessageEvent}``.
+
+Tripwires: (1) the tests exercise the REAL preprocessor/ExecutionContext, so a
+``pip install`` against a new SDK + ``pytest`` fails loudly; (2)
+``doctor.check_jam_delivery_sdk_coupling`` imports each symbol above and reports
+a clear, actionable failure at ``cb doctor`` time. If you bump band-sdk and
+either trips, re-verify this module against the new SDK shapes. band-sdk is
+pinned ``>=0.2.8,<0.3``; the ``1.0`` ``thenvoi``→``band`` rename is a whole-repo
+migration that will touch this module too.
 """
 
 from __future__ import annotations
