@@ -209,13 +209,33 @@ def test_jam_mode_builds_jam_agent(monkeypatch):
     assert isinstance(out, JamAgent)
 
 
-def test_jam_preflight_raises_when_daemon_unreachable(monkeypatch, tmp_path):
+async def test_jam_preflight_raises_when_daemon_unreachable(monkeypatch, tmp_path):
+    # Async on purpose: run_local/run_agent await this from inside a RUNNING
+    # event loop, so the preflight must not call asyncio.run() (round-1 high).
     import codeband.orchestration.runner as r
 
     # Point at a config dir with no jam.sock → ping fails → fail fast.
     monkeypatch.setenv("JAM_CONFIG_DIR", str(tmp_path))
     with pytest.raises(SystemExit):
-        r._jam_delivery_preflight(_config(delivery="jam"))
+        await r._jam_delivery_preflight(_config(delivery="jam"))
+
+
+async def test_run_closes_control_on_transport_fatal(monkeypatch):
+    """run() must close the UDS client on a clean (transport-fatal) return."""
+
+    class BoomControl(FakeControl):
+        async def inbox(self, target):
+            raise RuntimeError("jamd down")
+
+    control = BoomControl()
+    agent, adapter, _ = _make_agent(control=control)
+    agent._poll_interval = 0  # no backoff sleep in the test
+    monkeypatch.setattr("codeband.transport.jam_runtime._MAX_INBOX_FAILURES", 2)
+
+    await asyncio.wait_for(agent.run(), timeout=5)
+
+    assert control.closed is True  # httpx UDS client not leaked
+    assert adapter.started  # start()'s adapter handshake ran
 
 
 # --- receive shape / brain parity (round-1 blocker #1) --------------------

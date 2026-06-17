@@ -805,26 +805,26 @@ def _create_delivery_agent(adapter, creds: AgentCredentials, config: CodebandCon
     return _create_band_agent(adapter, creds, config)
 
 
-def _jam_delivery_preflight(config: CodebandConfig) -> None:
+async def _jam_delivery_preflight(config: CodebandConfig) -> None:
     """Fail fast (jam mode only) if jamd's control socket is unreachable.
 
     Per-agent adoption happens idempotently in each ``JamAgent.start()``; this is
     only a one-shot reachability check so an operator who opted into ``jam`` gets
     a clear error before the swarm spins up, instead of every agent backing off.
     No-op on the default ``sdk`` path (callers guard on ``_resolve_delivery_mode``).
-    """
-    import asyncio
 
+    Async: ``run_local`` / ``run_agent`` are already inside a running event loop,
+    so this awaits the probe directly (a nested ``asyncio.run`` would raise).
+    """
     from codeband.transport.jam_control import JamControlClient, socket_path
 
-    async def _probe() -> bool:
-        client = JamControlClient()
-        try:
-            return await client.ping()
-        finally:
-            await client.close()
+    client = JamControlClient()
+    try:
+        reachable = await client.ping()
+    finally:
+        await client.close()
 
-    if not asyncio.run(_probe()):
+    if not reachable:
         raise SystemExit(
             "CODEBAND_DELIVERY=jam but the jam daemon control socket is not "
             f"reachable at {socket_path()}. Start it with `jam daemon run` (or "
@@ -998,7 +998,7 @@ async def run_local(
     if _resolve_delivery_mode(resolved_config) == "jam":
         # Opt-in jam delivery: fail fast if jamd is unreachable before spinning
         # up the swarm. No effect on the default sdk path.
-        _jam_delivery_preflight(resolved_config)
+        await _jam_delivery_preflight(resolved_config)
     _patch_band_local_runtime()
     _patch_codex_adapter_resilience()
     # Every agent session spawned below inherits the resolved project dir so
@@ -1368,7 +1368,7 @@ async def run_agent(config: CodebandConfig, project_dir: Path, agent_key: str) -
     resolved_config = _resolve_workspace_config(config, project_dir)
     if _resolve_delivery_mode(resolved_config) == "jam":
         # Opt-in jam delivery (distributed mode): fail fast if jamd is down.
-        _jam_delivery_preflight(resolved_config)
+        await _jam_delivery_preflight(resolved_config)
     layout = initialize_agent_workspace(resolved_config, agent_key, role)
     # Same seam as run_local: the agent session spawned below inherits the
     # resolved project dir so cb-phase / cb approve work from any cwd. In

@@ -171,7 +171,10 @@ class JamAgent:
         try:
             await self._dispatcher_task
         finally:
-            await self._drain_workers()
+            # Close on BOTH clean return (transport-fatal) and cancellation, so
+            # the httpx UDS client never leaks — distributed run_agent's clean
+            # exit doesn't route through stop(). Idempotent with _safe_stop_agent.
+            await self.stop()
 
     async def stop(self, timeout: float | None = None) -> bool:
         """Cancel the dispatcher + all room workers and close transports."""
@@ -186,6 +189,11 @@ class JamAgent:
         if self._control is not None:
             await self._control.close()
         return True
+
+    async def close(self) -> None:
+        """Alias for :meth:`stop` — distributed ``run_agent`` teardown calls
+        ``agent.close()`` when present; route it through the same idempotent path."""
+        await self.stop()
 
     async def _drain_workers(self) -> None:
         workers = list(self._workers.values())
