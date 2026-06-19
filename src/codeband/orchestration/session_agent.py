@@ -22,10 +22,6 @@ def _sessions_dir() -> Path:
     return Path.home() / ".codeband" / "sessions"
 
 
-def _marker_path(agent_id: str) -> Path:
-    return _sessions_dir() / f"{agent_id}.json"
-
-
 def repo_slug_from_project(project_dir: Path | None = None) -> str:
     """Extract a short repo slug from git origin, falling back to 'repo'."""
     try:
