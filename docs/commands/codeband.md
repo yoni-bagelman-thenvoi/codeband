@@ -1,7 +1,7 @@
 ---
-description: One-shot codeband swarm — bootstraps the stack on first run (just bring 3 keys), then runs a swarm against the CURRENT repo with THIS Claude as the sole Band coordinator (own identity, owns the room, auto-woken from the room log)
+description: One-shot codeband swarm — bootstraps the stack on first run (just bring 3 keys), then runs a swarm against the CURRENT repo with THIS Claude as the sole Band coordinator (own identity, owns the room, auto-woken via claudecode team inbox; requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
 argument-hint: [task description]
-allowed-tools: [Bash, Monitor, Read, TaskStop]
+allowed-tools: [Bash, Monitor, Read, TaskStop, TeamCreate, ScheduleWakeup]
 ---
 You are the codeband conductor. The user wants to run a codeband swarm (Claude + Codex agents) **against the repo this Claude Code session is running in**, with **YOU as a first-class Band peer who owns the task room and coordinates the swarm** — the user talks to you in natural language; you talk to the swarm. The user should never touch `cb feed` or the Band UI.
 
@@ -13,7 +13,7 @@ $ARGUMENTS
 
 - A single shared **codeband home** (`~/projects/codeband`) holds the keys (`.env`) and the 10 registered Band agents (`agent_config.yaml`). It gets re-pointed at the current repo each run. Only ONE codeband runs at a time; switching repos wipes the prior workspace.
 - **You** (`jam`) come online as your own ephemeral Band agent (`yoni/claude-<repo>-<hex>`). **You create the task room with your OWN agent key** and add the 10 codeband agents to it. You are `task.owner`, so the Conductor reports back to you by @mentioning you.
-- Delivery: the room Monitor reads the **authoritative full room** via `cb room-log` and auto-wakes you for each new Band message. Do not use the jam bridge's `team-lead.json` inbox slice for delivery; it is not the source of truth for this owner-coordinator loop.
+- Delivery: inbound Band messages auto-wake this session as `<teammate-message>` blocks via the claudecode team inbox (requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` at CC launch time). When woken, read the authoritative full room via `cb room-log` — not the team-lead inbox slice, which is a filtered context view. The Step 7 Monitor backstop and Step 7d self-wakeup remain mandatory even in teams mode: if the bridge worker stops or the host PID dies, inbound silently stops, and the Monitor is your liveness guarantee.
 - You post to the room with `jam send`, relay concise summaries to the user, and handle approvals as the sole coordinator.
 
 ## Important constraints to relay if relevant
@@ -113,6 +113,23 @@ Remember `CB_HOME`, `TARGET_DIR`, and `TEAM` from the output — later steps nee
 
 ### Step 3 — come online as a Band peer (your own identity)
 
+**Pre-check — `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` required.** Auto-wake via the claudecode host needs agent-teams enabled at CC launch time. If the `TeamCreate` tool is **not available** to you (not in your tool list), stop here: tell the user to close this session and relaunch Claude Code with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude`, then re-invoke `/codeband`. (You can still send without teams enabled but will not auto-receive.)
+
+If `TeamCreate` **is available**, call it now before the bash block:
+
+```
+TeamCreate(
+  team_name="codeband-<slug>",    # the $TEAM value from Step 2 output
+  agent_type="team-lead",
+  description="codeband coordinator"
+)
+```
+
+**Stale-team guard** — if TeamCreate reports the team already exists, treat it by case:
+- **Case A — exact reattach** (same session/repo, CC was relaunched with a new PID): the team belongs to this run's peer. Skip TeamCreate and go directly to `jam attach` in the bash block below.
+- **Case B — remote-missing** (confirmed by `jam reconcile` showing `REMOTE=missing` for `$JAM_SESSION`): the peer's Band agent was deleted remotely. Archive with `jam --session "$JAM_SESSION" archive --reason remote_missing`, then call TeamCreate fresh.
+- **Case C — live peer with name collision** (a different, live peer owns `$TEAM`): do NOT archive that peer. Choose a unique team name instead — `$TEAM` is already `codeband-$SLUG`; if another live peer uses that exact name, add a short suffix (e.g. `codeband-$SLUG-run`) or ask the user. Never reuse a team name that belongs to a different live peer.
+
 Run from the **target dir** so your bridge is scoped to this repo's cwd:
 
 ```bash
@@ -120,18 +137,47 @@ cd "$TARGET_DIR"
 # Use an explicit --session key (== TEAM) so this run's peer is selected
 # deterministically — not "first running peer globally" which can bind to
 # a completely unrelated session (e.g., Lyra) when other jam peers are active.
-# The session key is a stable per-repo name here; a later refactor can swap
-# it for $TEAM-$(uuidgen) to get fresh-per-run identities without changing
-# the selection mechanism.
 JAM_SESSION="$TEAM"
-if jam --session "$JAM_SESSION" status 2>/dev/null | grep -q 'running=true'; then
-  echo "bridge already running for session $JAM_SESSION"
+# Capture CLAUDE_PID inside this same Bash tool call — $PPID is the CC process
+# that spawned the shell. Capturing it in a prior shell invocation targets the wrong PID.
+CLAUDE_PID="$PPID"
+
+if jam --session "$JAM_SESSION" status 2>/dev/null | grep -qv 'error\|not found'; then
+  # Peer exists (any state — running, stopped, or stale host). Reattach to refresh
+  # the host PID binding. Do NOT skip even if running=true: CC was relaunched and
+  # the old PID is dead; attach updates the binding without creating a new Band agent.
+  jam --session "$JAM_SESSION" attach \
+    --host claudecode \
+    --team "$TEAM" \
+    --agent-session-provider claudecode \
+    --host-pid "$CLAUDE_PID"
 else
-  jam --session "$JAM_SESSION" onboard --team "$TEAM" >/dev/null 2>&1
+  # No local peer record — onboard a new Band agent.
+  jam --session "$JAM_SESSION" onboard \
+    --host claudecode \
+    --team "$TEAM" \
+    --name "$TEAM" \
+    --agent-session-provider claudecode \
+    --host-pid "$CLAUDE_PID"
+  # If you know the current session id or transcript path, also pass:
+  #   --agent-session-id <id>   OR   --agent-session-path <path-to-jsonl>
+  # This enables precise logical-session binding in multi-session cwd setups.
 fi
-jam --session "$JAM_SESSION" status
+
 export JAM_SESSION
 ```
+
+**Team-ready ordering gate (risk #1) — do NOT proceed to Step 4 until this passes.**
+
+Run `jam --session "$JAM_SESSION" status` and verify **all** of the following before continuing:
+- `running=true` is present.
+- `Degraded` is **absent** from the status line.
+- `warning=""` (the warning field is empty).
+
+Any other shape is a **stop condition**. Remedies:
+- `Degraded ... warning="claudecode team is not ready yet"`: the `TeamCreate` call above may not have persisted, or the `--team` value in attach/onboard drifted from the team name used in `TeamCreate`. Recheck both, fix, and retry.
+- Host `missing` or `disconnected`: rerun `jam attach` with the correct `--host-pid`.
+- Any other non-empty warning: diagnose per jam skill §8 before proceeding.
 
 The first token of the status line (`owner/handle`) is your handle. Quote it to the user later.
 
